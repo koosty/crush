@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
+	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/tui/exp/list"
 	"github.com/charmbracelet/crush/internal/tui/styles"
 	"github.com/charmbracelet/crush/internal/tui/util"
@@ -66,6 +67,18 @@ func (m *ModelListComponent) Init() tea.Cmd {
 				filteredProviders = append(filteredProviders, p)
 			}
 		}
+
+		// Add GitHub Copilot provider (uses OAuth device flow, not env var API key).
+		copilotProvider := catwalk.Provider{
+			Name:                "GitHub Copilot",
+			ID:                  "github-copilot",
+			APIKey:              "$CRUSH_GITHUB_COPILOT_TOKEN",
+			Type:                catwalk.TypeOpenAICompat,
+			DefaultLargeModelID: "gpt-4.1",
+			DefaultSmallModelID: "gpt-4o",
+			Models:              copilot.DefaultModels(),
+		}
+		filteredProviders = append(filteredProviders, copilotProvider)
 
 		m.providers = filteredProviders
 		if err != nil {

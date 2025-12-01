@@ -23,7 +23,9 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 	"github.com/charmbracelet/crush/internal/home"
 	"github.com/charmbracelet/crush/internal/log"
+	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/claude"
+	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	powernapConfig "github.com/charmbracelet/x/powernap/pkg/config"
 )
 
@@ -279,6 +281,17 @@ func (c *Config) configureProviders(env env.Env, resolver VariableResolver, know
 	// validate the custom providers
 	for id, providerConfig := range c.Providers.Seq2() {
 		if knownProviderNames[id] {
+			continue
+		}
+
+		// Handle GitHub Copilot provider specially.
+		if id == "github-copilot" {
+			if err := c.configureGitHubCopilot(env, resolver, &providerConfig); err != nil {
+				slog.Warn("Skipping GitHub Copilot provider", "error", err)
+				c.Providers.Del(id)
+				continue
+			}
+			c.Providers.Set(id, providerConfig)
 			continue
 		}
 
@@ -746,3 +759,57 @@ func isInsideWorktree() bool {
 	).CombinedOutput()
 	return err == nil && strings.TrimSpace(string(bts)) == "true"
 }
+
+// configureGitHubCopilot sets up the GitHub Copilot provider.
+func (c *Config) configureGitHubCopilot(env env.Env, resolver VariableResolver, providerConfig *ProviderConfig) error {
+	providerConfig.ID = "github-copilot"
+	providerConfig.Name = "GitHub Copilot"
+	providerConfig.Type = "github-copilot" // Must match coordinator.buildProvider switch case.
+	providerConfig.BaseURL = "https://api.githubcopilot.com"
+
+	if providerConfig.ExtraHeaders == nil {
+		providerConfig.ExtraHeaders = make(map[string]string)
+	}
+	if providerConfig.ExtraParams == nil {
+		providerConfig.ExtraParams = make(map[string]string)
+	}
+
+	// Check for OAuth token from environment variable.
+	envToken := env.Get("CRUSH_GITHUB_COPILOT_TOKEN")
+	if envToken != "" {
+		// Store GitHub OAuth token in RefreshToken field (used by transport).
+		providerConfig.OAuthToken = &oauth.Token{
+			RefreshToken: envToken,
+		}
+	}
+
+	// Also check if APIKey is set (might be from config file).
+	if providerConfig.OAuthToken == nil && providerConfig.APIKey != "" {
+		resolvedKey, err := resolver.ResolveValue(providerConfig.APIKey)
+		if err == nil && resolvedKey != "" {
+			providerConfig.OAuthToken = &oauth.Token{
+				RefreshToken: resolvedKey,
+			}
+		}
+	}
+
+	// Validate that we have credentials.
+	if providerConfig.OAuthToken == nil || providerConfig.OAuthToken.RefreshToken == "" {
+		return fmt.Errorf("no GitHub token found: set CRUSH_GITHUB_COPILOT_TOKEN or configure api_key")
+	}
+
+	// Fetch models from models.dev API if not configured.
+	if len(providerConfig.Models) == 0 {
+		providerConfig.Models = copilot.GetModels(context.Background())
+	}
+
+	// Set up Copilot-specific headers.
+	providerConfig.SetupGitHubCopilot()
+
+	if providerConfig.Disable {
+		return fmt.Errorf("provider is disabled")
+	}
+
+	return nil
+}
+

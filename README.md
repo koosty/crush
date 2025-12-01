@@ -186,14 +186,36 @@ That said, you can also set environment variables for preferred providers.
 | `VERTEXAI_PROJECT`          | Google Cloud VertexAI (Gemini)                     |
 | `VERTEXAI_LOCATION`         | Google Cloud VertexAI (Gemini)                     |
 | `GROQ_API_KEY`              | Groq                                               |
-| `AWS_ACCESS_KEY_ID`         | Amazon Bedrock (Claude)                               |
-| `AWS_SECRET_ACCESS_KEY`     | Amazon Bedrock (Claude)                               |
-| `AWS_REGION`                | Amazon Bedrock (Claude)                               |
-| `AWS_PROFILE`               | Amazon Bedrock (Custom Profile)                       |
-| `AWS_BEARER_TOKEN_BEDROCK`  | Amazon Bedrock                                        |
+| `AWS_ACCESS_KEY_ID`         | Amazon Bedrock (Claude)                            |
+| `AWS_SECRET_ACCESS_KEY`     | Amazon Bedrock (Claude)                            |
+| `AWS_REGION`                | Amazon Bedrock (Claude)                            |
+| `AWS_PROFILE`               | Amazon Bedrock (Custom Profile)                    |
+| `AWS_BEARER_TOKEN_BEDROCK`  | Amazon Bedrock                                     |
 | `AZURE_OPENAI_API_ENDPOINT` | Azure OpenAI models                                |
 | `AZURE_OPENAI_API_KEY`      | Azure OpenAI models (optional when using Entra ID) |
 | `AZURE_OPENAI_API_VERSION`  | Azure OpenAI models                                |
+
+### GitHub Copilot
+
+Crush supports GitHub Copilot as a provider. If you have an active GitHub Copilot
+subscription, you can use it with Crush through OAuth device flow authentication.
+
+**To get started:**
+
+1. Run `crush` and select a GitHub Copilot model from the model picker
+2. You'll be prompted to visit GitHub and enter a device code
+3. Authorize the application on GitHub
+4. Crush will automatically save your credentials
+
+Alternatively, if you have a GitHub token with Copilot access, you can set it via
+environment variable:
+
+```bash
+export CRUSH_GITHUB_COPILOT_TOKEN=ghu_xxxxxxxxxxxx
+```
+
+GitHub Copilot provides access to models like GPT-4.1, GPT-4o, GPT-5-mini, and others
+depending on your subscription.
 
 ### By the Way
 

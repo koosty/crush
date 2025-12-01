@@ -31,6 +31,7 @@ import (
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/claude"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/commands"
+	"github.com/charmbracelet/crush/internal/tui/components/dialogs/copilot"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/filepicker"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/models"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/reasoning"
@@ -295,6 +296,13 @@ func (p *chatPage) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 		return p, tea.Batch(cmds...)
 
 	case claude.ValidationCompletedMsg, claude.AuthenticationCompleteMsg:
+		if p.focusedPane == PanelTypeSplash {
+			u, cmd := p.splash.Update(msg)
+			p.splash = u.(splash.Splash)
+			cmds = append(cmds, cmd)
+		}
+		return p, tea.Batch(cmds...)
+	case copilot.DeviceFlowStartedMsg, copilot.PollingResultMsg, copilot.ValidationCompletedMsg, copilot.AuthenticationCompleteMsg:
 		if p.focusedPane == PanelTypeSplash {
 			u, cmd := p.splash.Update(msg)
 			p.splash = u.(splash.Splash)

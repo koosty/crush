@@ -10,9 +10,11 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/catwalk/pkg/catwalk"
@@ -24,6 +26,8 @@ import (
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
+	"github.com/charmbracelet/crush/internal/oauth"
+	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/session"
 	"golang.org/x/sync/errgroup"
@@ -130,7 +134,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 
 	mergedOptions, temp, topP, topK, freqPenalty, presPenalty := mergeCallOptions(model, providerCfg)
 
-	if providerCfg.OAuthToken != nil && providerCfg.OAuthToken.IsExpired() {
+	// Check if OAuth token needs refresh.
+	// Skip for GitHub Copilot - it uses a different token flow handled by its transport.
+	if providerCfg.OAuthToken != nil && providerCfg.ID != copilot.ProviderID && providerCfg.OAuthToken.IsExpired() {
 		slog.Info("Detected expired OAuth token, attempting refresh", "provider", providerCfg.ID)
 		if refreshErr := c.cfg.RefreshOAuthToken(ctx, providerCfg.ID); refreshErr != nil {
 			slog.Error("Failed to refresh OAuth token", "provider", providerCfg.ID, "error", refreshErr)
@@ -641,6 +647,55 @@ func (c *coordinator) buildGoogleVertexProvider(headers map[string]string, optio
 	return google.New(opts...)
 }
 
+func (c *coordinator) buildCopilotProvider(providerCfg config.ProviderConfig) (fantasy.Provider, error) {
+	// Token provider - returns the current OAuth token from config.
+	tokenProvider := func() (*oauth.Token, error) {
+		cfg, ok := c.cfg.Providers.Get(providerCfg.ID)
+		if !ok {
+			return nil, fmt.Errorf("provider %s not found", providerCfg.ID)
+		}
+		return cfg.OAuthToken, nil
+	}
+
+	// Token saver - persists the updated OAuth token (with Copilot token) to config.
+	tokenSaver := func(token *oauth.Token) error {
+		// Update the in-memory provider config.
+		cfg, ok := c.cfg.Providers.Get(providerCfg.ID)
+		if !ok {
+			return fmt.Errorf("provider %s not found", providerCfg.ID)
+		}
+		cfg.OAuthToken = token
+		c.cfg.Providers.Set(providerCfg.ID, cfg)
+
+		// Persist to config file.
+		return c.cfg.SetConfigField(
+			fmt.Sprintf("providers.%s.oauth", providerCfg.ID),
+			token,
+		)
+	}
+
+	// Create custom transport that handles token management.
+	transport := copilot.NewTransport(tokenProvider, tokenSaver)
+
+	if c.cfg.Options.Debug {
+		// Wrap the debug transport if debugging is enabled.
+		transport.SetBaseTransport(log.NewHTTPClient().Transport)
+	}
+
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   5 * time.Minute,
+	}
+
+	opts := []openaicompat.Option{
+		openaicompat.WithBaseURL(copilot.CopilotAPIBaseURL),
+		openaicompat.WithAPIKey("placeholder"), // Not used - transport handles auth.
+		openaicompat.WithHTTPClient(httpClient),
+	}
+
+	return openaicompat.New(opts...)
+}
+
 func (c *coordinator) isAnthropicThinking(model config.SelectedModel) bool {
 	if model.Think {
 		return true
@@ -695,6 +750,8 @@ func (c *coordinator) buildProvider(providerCfg config.ProviderConfig, model con
 		return c.buildGoogleVertexProvider(headers, providerCfg.ExtraParams)
 	case openaicompat.Name:
 		return c.buildOpenaiCompatProvider(baseURL, apiKey, headers, providerCfg.ExtraBody)
+	case "github-copilot":
+		return c.buildCopilotProvider(providerCfg)
 	default:
 		return nil, fmt.Errorf("provider type not supported: %q", providerCfg.Type)
 	}

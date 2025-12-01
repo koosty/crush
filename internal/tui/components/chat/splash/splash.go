@@ -14,10 +14,12 @@ import (
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/home"
+	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/tui/components/chat"
 	"github.com/charmbracelet/crush/internal/tui/components/core"
 	"github.com/charmbracelet/crush/internal/tui/components/core/layout"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/claude"
+	"github.com/charmbracelet/crush/internal/tui/components/dialogs/copilot"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/models"
 	"github.com/charmbracelet/crush/internal/tui/components/logo"
 	lspcomponent "github.com/charmbracelet/crush/internal/tui/components/lsp"
@@ -55,6 +57,9 @@ type Splash interface {
 
 	// IsClaudeOAuthComplete returns whether Claude OAuth flow is complete
 	IsClaudeOAuthComplete() bool
+
+	// IsShowingCopilotOAuth2 returns whether showing Copilot OAuth2 flow
+	IsShowingCopilotOAuth2() bool
 }
 
 const (
@@ -92,6 +97,10 @@ type splashCmp struct {
 	claudeOAuth2                *claude.OAuth2
 	showClaudeAuthMethodChooser bool
 	showClaudeOAuth2            bool
+
+	// Copilot state
+	copilotOAuth2     *copilot.OAuth2
+	showCopilotOAuth2 bool
 }
 
 func New() Splash {
@@ -120,6 +129,7 @@ func New() Splash {
 
 		claudeAuthMethodChooser: claude.NewAuthMethodChooser(),
 		claudeOAuth2:            claude.NewOAuth2(),
+		copilotOAuth2:           copilot.NewOAuth2(),
 	}
 }
 
@@ -143,6 +153,7 @@ func (s *splashCmp) Init() tea.Cmd {
 		s.apiKeyInput.Init(),
 		s.claudeAuthMethodChooser.Init(),
 		s.claudeOAuth2.Init(),
+		s.copilotOAuth2.Init(),
 	)
 }
 
@@ -190,6 +201,51 @@ func (s *splashCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 		s.showClaudeAuthMethodChooser = false
 		s.showClaudeOAuth2 = false
 		return s, util.CmdHandler(OnboardingCompleteMsg{})
+	case copilot.AuthenticationCompleteMsg:
+		s.showCopilotOAuth2 = false
+		return s, util.CmdHandler(OnboardingCompleteMsg{})
+	case copilot.ValidationCompletedMsg:
+		var cmds []tea.Cmd
+		u, cmd := s.copilotOAuth2.Update(msg)
+		s.copilotOAuth2 = u.(*copilot.OAuth2)
+		cmds = append(cmds, cmd)
+
+		if msg.Error == nil && s.copilotOAuth2.State == copilot.OAuthStateSuccess {
+			cmds = append(
+				cmds,
+				s.saveCopilotTokenAndContinue(s.copilotOAuth2.Token(), false),
+				func() tea.Msg {
+					time.Sleep(3 * time.Second)
+					return copilot.AuthenticationCompleteMsg{}
+				},
+			)
+		}
+
+		return s, tea.Batch(cmds...)
+	case copilot.DeviceFlowStartedMsg:
+		// Forward device flow started message to copilot OAuth2 component.
+		u, cmd := s.copilotOAuth2.Update(msg)
+		s.copilotOAuth2 = u.(*copilot.OAuth2)
+		return s, cmd
+	case copilot.PollingResultMsg:
+		// Forward polling result message to copilot OAuth2 component.
+		u, cmd := s.copilotOAuth2.Update(msg)
+		s.copilotOAuth2 = u.(*copilot.OAuth2)
+
+		// If polling succeeded with a token, save it and continue.
+		var cmds []tea.Cmd
+		cmds = append(cmds, cmd)
+		if msg.Error == nil && msg.Token != "" {
+			cmds = append(
+				cmds,
+				s.saveCopilotTokenAndContinue(s.copilotOAuth2.Token(), false),
+				func() tea.Msg {
+					time.Sleep(3 * time.Second)
+					return copilot.AuthenticationCompleteMsg{}
+				},
+			)
+		}
+		return s, tea.Batch(cmds...)
 	case models.APIKeyStateChangeMsg:
 		u, cmd := s.apiKeyInput.Update(msg)
 		s.apiKeyInput = u.(*models.APIKeyInput)
@@ -236,6 +292,12 @@ func (s *splashCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 				s.showClaudeAuthMethodChooser = true
 				return s, nil
 			}
+			if s.showCopilotOAuth2 {
+				s.copilotOAuth2.SetDefaults()
+				s.showCopilotOAuth2 = false
+				s.selectedModel = nil
+				return s, nil
+			}
 			if s.isAPIKeyValid {
 				return s, nil
 			}
@@ -275,6 +337,11 @@ func (s *splashCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 				s.claudeOAuth2 = m2.(*claude.OAuth2)
 				return s, cmd2
 			}
+			if s.showCopilotOAuth2 {
+				m2, cmd2 := s.copilotOAuth2.ValidationConfirm()
+				s.copilotOAuth2 = m2.(*copilot.OAuth2)
+				return s, cmd2
+			}
 			if s.isAPIKeyValid {
 				return s, s.saveAPIKeyAndContinue(s.apiKeyValue, true)
 			}
@@ -291,6 +358,12 @@ func (s *splashCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 					if selectedItem.Provider.ID == catwalk.InferenceProviderAnthropic {
 						s.showClaudeAuthMethodChooser = true
 						return s, nil
+					}
+					// Check for GitHub Copilot provider (uses OAuth device flow).
+					if string(selectedItem.Provider.ID) == "github-copilot" {
+						s.selectedModel = selectedItem
+						s.showCopilotOAuth2 = true
+						return s, s.copilotOAuth2.StartFlow()
 					}
 					// Provider not configured, show API key input
 					s.needsAPIKey = true
@@ -424,9 +497,21 @@ func (s *splashCmp) Update(msg tea.Msg) (util.Model, tea.Cmd) {
 			u, cmd := s.claudeOAuth2.Update(msg)
 			s.claudeOAuth2 = u.(*claude.OAuth2)
 			return s, cmd
+		} else if s.showCopilotOAuth2 {
+			u, cmd := s.copilotOAuth2.Update(msg)
+			s.copilotOAuth2 = u.(*copilot.OAuth2)
+			return s, cmd
 		} else {
 			u, cmd := s.apiKeyInput.Update(msg)
 			s.apiKeyInput = u.(*models.APIKeyInput)
+			return s, cmd
+		}
+	default:
+		// Forward unhandled messages to the copilot component when showing Copilot OAuth.
+		// This handles internal messages like deviceFlowStartedMsg and pollingResultMsg.
+		if s.showCopilotOAuth2 {
+			u, cmd := s.copilotOAuth2.Update(msg)
+			s.copilotOAuth2 = u.(*copilot.OAuth2)
 			return s, cmd
 		}
 	}
@@ -450,6 +535,30 @@ func (s *splashCmp) saveAPIKeyAndContinue(apiKey any, close bool) tea.Cmd {
 	s.isOnboarding = false
 	s.selectedModel = nil
 	s.isAPIKeyValid = false
+
+	if close {
+		return tea.Batch(cmd, util.CmdHandler(OnboardingCompleteMsg{}))
+	}
+	return cmd
+}
+
+func (s *splashCmp) saveCopilotTokenAndContinue(token *oauth.Token, close bool) tea.Cmd {
+	if s.selectedModel == nil {
+		return nil
+	}
+
+	cfg := config.Get()
+	// For Copilot, we save the OAuth token (which contains the GitHub token in RefreshToken).
+	err := cfg.SetProviderAPIKey(string(s.selectedModel.Provider.ID), token)
+	if err != nil {
+		return util.ReportError(fmt.Errorf("failed to save Copilot token: %w", err))
+	}
+
+	// Reset state and continue with model selection.
+	s.showCopilotOAuth2 = false
+	cmd := s.setPreferredModel(*s.selectedModel)
+	s.isOnboarding = false
+	s.selectedModel = nil
 
 	if close {
 		return tea.Batch(cmd, util.CmdHandler(OnboardingCompleteMsg{}))
@@ -585,6 +694,22 @@ func (s *splashCmp) View() string {
 			lipgloss.JoinVertical(
 				lipgloss.Left,
 				t.S().Base.PaddingLeft(1).Foreground(t.Primary).Render("Let's Auth Anthropic"),
+				"",
+				oauth2View,
+			),
+		)
+		content = lipgloss.JoinVertical(
+			lipgloss.Left,
+			s.logoRendered,
+			oauthSelector,
+		)
+	} else if s.showCopilotOAuth2 {
+		remainingHeight := s.height - lipgloss.Height(s.logoRendered) - (SplashScreenPaddingY * 2)
+		oauth2View := s.copilotOAuth2.View()
+		oauthSelector := t.S().Base.AlignVertical(lipgloss.Bottom).Height(remainingHeight).Render(
+			lipgloss.JoinVertical(
+				lipgloss.Left,
+				t.S().Base.PaddingLeft(1).Foreground(t.Primary).Render("Let's Auth GitHub Copilot"),
 				"",
 				oauth2View,
 			),
@@ -819,6 +944,11 @@ func (s *splashCmp) Bindings() []key.Binding {
 			bindings = append(bindings, s.keyMap.Copy)
 		}
 		return bindings
+	} else if s.showCopilotOAuth2 {
+		return []key.Binding{
+			s.keyMap.Select,
+			s.keyMap.Back,
+		}
 	} else if s.needsAPIKey {
 		return []key.Binding{
 			s.keyMap.Select,
@@ -939,4 +1069,8 @@ func (s *splashCmp) IsClaudeOAuthURLState() bool {
 
 func (s *splashCmp) IsClaudeOAuthComplete() bool {
 	return s.showClaudeOAuth2 && s.claudeOAuth2.State == claude.OAuthStateCode && s.claudeOAuth2.ValidationState == claude.OAuthValidationStateValid
+}
+
+func (s *splashCmp) IsShowingCopilotOAuth2() bool {
+	return s.showCopilotOAuth2
 }

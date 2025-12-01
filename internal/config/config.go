@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/crush/internal/env"
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/claude"
+	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/invopop/jsonschema"
 	"github.com/tidwall/sjson"
 )
@@ -131,6 +132,21 @@ func (pc *ProviderConfig) SetupClaudeCode() {
 		value += want
 	}
 	pc.ExtraHeaders["anthropic-beta"] = value
+}
+
+// SetupGitHubCopilot configures the provider for GitHub Copilot.
+// Note: Authentication is handled by the custom transport, not via APIKey header.
+func (pc *ProviderConfig) SetupGitHubCopilot() {
+	if pc.ExtraHeaders == nil {
+		pc.ExtraHeaders = make(map[string]string)
+	}
+	// These headers mimic VS Code's Copilot extension.
+	pc.ExtraHeaders["User-Agent"] = "GitHubCopilotChat/0.32.4"
+	pc.ExtraHeaders["Editor-Version"] = "vscode/1.105.1"
+	pc.ExtraHeaders["Editor-Plugin-Version"] = "copilot-chat/0.32.4"
+	pc.ExtraHeaders["Copilot-Integration-Id"] = "vscode-chat"
+	pc.ExtraHeaders["Openai-Intent"] = "conversation-edits"
+	pc.ExtraHeaders["X-Initiator"] = "user"
 }
 
 type MCPType string
@@ -518,21 +534,49 @@ func (c *Config) SetProviderAPIKey(providerID string, apiKey any) error {
 		}
 		setKeyOrToken = func() { providerConfig.APIKey = v }
 	case *oauth.Token:
-		if err := cmp.Or(
-			c.SetConfigField(fmt.Sprintf("providers.%s.api_key", providerID), v.AccessToken),
-			c.SetConfigField(fmt.Sprintf("providers.%s.oauth", providerID), v),
-		); err != nil {
-			return err
-		}
-		setKeyOrToken = func() {
-			providerConfig.APIKey = v.AccessToken
-			providerConfig.OAuthToken = v
-			providerConfig.SetupClaudeCode()
+		// For Copilot, the GitHub OAuth token is stored in RefreshToken.
+		if providerID == copilot.ProviderID {
+			if err := c.SetConfigField(fmt.Sprintf("providers.%s.oauth", providerID), v); err != nil {
+				return err
+			}
+			setKeyOrToken = func() {
+				providerConfig.OAuthToken = v
+				providerConfig.SetupGitHubCopilot()
+			}
+		} else {
+			if err := cmp.Or(
+				c.SetConfigField(fmt.Sprintf("providers.%s.api_key", providerID), v.AccessToken),
+				c.SetConfigField(fmt.Sprintf("providers.%s.oauth", providerID), v),
+			); err != nil {
+				return err
+			}
+			setKeyOrToken = func() {
+				providerConfig.APIKey = v.AccessToken
+				providerConfig.OAuthToken = v
+				providerConfig.SetupClaudeCode()
+			}
 		}
 	}
 
 	providerConfig, exists = c.Providers.Get(providerID)
 	if exists {
+		setKeyOrToken()
+		c.Providers.Set(providerID, providerConfig)
+		return nil
+	}
+
+	// Handle GitHub Copilot specially since it's not in known providers.
+	if providerID == copilot.ProviderID {
+		providerConfig = ProviderConfig{
+			ID:           providerID,
+			Name:         "GitHub Copilot",
+			BaseURL:      "https://api.githubcopilot.com",
+			Type:         "github-copilot", // Must match coordinator.buildProvider switch case.
+			Disable:      false,
+			ExtraHeaders: make(map[string]string),
+			ExtraParams:  make(map[string]string),
+			Models:       copilot.GetModels(context.Background()),
+		}
 		setKeyOrToken()
 		c.Providers.Set(providerID, providerConfig)
 		return nil

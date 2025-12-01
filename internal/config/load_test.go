@@ -1095,6 +1095,156 @@ func TestConfig_defaultModelSelection(t *testing.T) {
 	})
 }
 
+func TestProviderConfig_SetupGitHubCopilot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sets expected headers", func(t *testing.T) {
+		t.Parallel()
+		pc := &ProviderConfig{}
+		pc.SetupGitHubCopilot()
+
+		require.NotNil(t, pc.ExtraHeaders)
+		require.Equal(t, "GitHubCopilotChat/0.32.4", pc.ExtraHeaders["User-Agent"])
+		require.Equal(t, "vscode/1.105.1", pc.ExtraHeaders["Editor-Version"])
+		require.Equal(t, "copilot-chat/0.32.4", pc.ExtraHeaders["Editor-Plugin-Version"])
+		require.Equal(t, "vscode-chat", pc.ExtraHeaders["Copilot-Integration-Id"])
+		require.Equal(t, "conversation-edits", pc.ExtraHeaders["Openai-Intent"])
+		require.Equal(t, "user", pc.ExtraHeaders["X-Initiator"])
+	})
+
+	t.Run("preserves existing headers", func(t *testing.T) {
+		t.Parallel()
+		pc := &ProviderConfig{
+			ExtraHeaders: map[string]string{
+				"Custom-Header": "custom-value",
+			},
+		}
+		pc.SetupGitHubCopilot()
+
+		require.Equal(t, "custom-value", pc.ExtraHeaders["Custom-Header"])
+		require.Equal(t, "GitHubCopilotChat/0.32.4", pc.ExtraHeaders["User-Agent"])
+	})
+}
+
+func TestConfig_configureGitHubCopilot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("configures provider with env token", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{
+			"CRUSH_GITHUB_COPILOT_TOKEN": "ghu_test_token",
+		})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.NoError(t, err)
+
+		require.Equal(t, "github-copilot", pc.ID)
+		require.Equal(t, "GitHub Copilot", pc.Name)
+		require.Equal(t, catwalk.Type("github-copilot"), pc.Type)
+		require.Equal(t, "https://api.githubcopilot.com", pc.BaseURL)
+		require.NotNil(t, pc.OAuthToken)
+		require.Equal(t, "ghu_test_token", pc.OAuthToken.RefreshToken)
+		require.NotNil(t, pc.ExtraHeaders)
+		require.Equal(t, "GitHubCopilotChat/0.32.4", pc.ExtraHeaders["User-Agent"])
+	})
+
+	t.Run("configures provider with api_key fallback", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{
+			APIKey: "ghu_from_config",
+		}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.NoError(t, err)
+
+		require.NotNil(t, pc.OAuthToken)
+		require.Equal(t, "ghu_from_config", pc.OAuthToken.RefreshToken)
+	})
+
+	t.Run("env token takes precedence over api_key", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{
+			"CRUSH_GITHUB_COPILOT_TOKEN": "ghu_env_token",
+		})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{
+			APIKey: "ghu_config_token",
+		}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.NoError(t, err)
+
+		require.Equal(t, "ghu_env_token", pc.OAuthToken.RefreshToken)
+	})
+
+	t.Run("returns error when no credentials", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no GitHub token found")
+	})
+
+	t.Run("returns error when provider is disabled", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{
+			"CRUSH_GITHUB_COPILOT_TOKEN": "ghu_test_token",
+		})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{
+			Disable: true,
+		}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "disabled")
+	})
+
+	t.Run("preserves existing models if configured", func(t *testing.T) {
+		t.Parallel()
+		cfg := &Config{}
+		cfg.setDefaults("/tmp", "")
+
+		testEnv := env.NewFromMap(map[string]string{
+			"CRUSH_GITHUB_COPILOT_TOKEN": "ghu_test_token",
+		})
+		resolver := NewEnvironmentVariableResolver(testEnv)
+		pc := &ProviderConfig{
+			Models: []catwalk.Model{
+				{ID: "custom-model"},
+			},
+		}
+
+		err := cfg.configureGitHubCopilot(testEnv, resolver, pc)
+		require.NoError(t, err)
+
+		require.Len(t, pc.Models, 1)
+		require.Equal(t, "custom-model", pc.Models[0].ID)
+	})
+}
+
 func TestConfig_configureSelectedModels(t *testing.T) {
 	t.Run("should override defaults", func(t *testing.T) {
 		knownProviders := []catwalk.Provider{
